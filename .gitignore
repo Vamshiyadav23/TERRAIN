@@ -1,0 +1,48 @@
+@"
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Generated outputs
+outputs/*
+!outputs/.gitkeep
+!outputs/visualizations/
+outputs/visualizations/*
+!outputs/visualizations/.gitkeep
+
+# Satellite / large data
+*.tif
+*.tiff
+*.jp2
+*.npy
+*.npz
+*.h5
+*.pt
+*.pth
+*.onnx
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+"@ | Set-Content .gitignore

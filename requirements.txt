@@ -1,0 +1,16 @@
+
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+numpy
+scipy
+opencv-python
+rasterio
+pystac-client
+requests
+python-dotenv
+shapely
+pyproj
+Pillow
+
