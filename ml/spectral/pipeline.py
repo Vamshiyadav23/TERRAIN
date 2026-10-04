@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from importlib import metadata
 import json
 import sys
 from pathlib import Path
 
 import numpy as np
+from rasterio.transform import Affine
 
+from ml.spectral.polygons import regions_to_feature_collection
 
 # ============================================================
 # Project path
@@ -731,6 +734,9 @@ def run_pipeline() -> dict:
             resolution_m=resolution_m,
         )
 
+        
+        metrics["_pixels"] = region["pixels"]
+
         zone_results.append(
             metrics
         )
@@ -754,8 +760,56 @@ def run_pipeline() -> dict:
         zone["region_id"] = index
 
     # --------------------------------------------------------
+    # Geographic zone polygons
+    # --------------------------------------------------------
+
+    spatial_reference = metadata["before"]["spatial_reference"]
+
+    raster_transform = Affine(
+        *spatial_reference["transform"]
+    )
+
+    source_crs = spatial_reference["crs"]
+
+    polygon_regions = []
+
+    for zone in zone_results:
+
+        polygon_region = {
+            "region_id": zone["region_id"],
+            "pixels": zone["_pixels"],
+            "pixel_count": zone["pixel_count"],
+            "centroid_row": zone["centroid"]["row"],
+            "centroid_col": zone["centroid"]["col"],
+            "bbox": zone["bbox"],
+        }
+
+        polygon_regions.append(
+            polygon_region
+        )
+
+    geojson = regions_to_feature_collection(
+        regions=polygon_regions,
+        raster_shape=before.shape[1:],
+        transform=raster_transform,
+        source_crs=source_crs,
+    )
+
+    print()
+    print(
+        f"GeoJSON zones: "
+        f"{len(geojson['features'])}"
+    )
+
+    
+    
+
+    # --------------------------------------------------------
     # Build report
     # --------------------------------------------------------
+
+    for zone in zone_results:
+            zone.pop("_pixels", None)
 
     report = {
 
@@ -881,6 +935,31 @@ def run_pipeline() -> dict:
         )
 
     # --------------------------------------------------------
+    # Save geographic change zones
+    # --------------------------------------------------------
+
+    GEOJSON_PATH = (
+        OUTPUT_DIR
+        / "spectral_change_zones.geojson"
+    )
+
+    with open(
+        GEOJSON_PATH,
+        "w",
+        encoding="utf-8",
+    ) as file:
+
+        json.dump(
+            geojson,
+            file,
+            indent=2,
+        )
+
+    print(
+        f"GeoJSON: {GEOJSON_PATH}"
+    )
+
+    # --------------------------------------------------------
     # Summary
     # --------------------------------------------------------
 
@@ -949,6 +1028,8 @@ def run_pipeline() -> dict:
     )
 
     return report
+
+    
 
 
 # ============================================================
