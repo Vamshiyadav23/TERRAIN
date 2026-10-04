@@ -5,7 +5,11 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+import base64
 
+from fastapi.responses import JSONResponse
+
+from backend.evidence import get_zone_evidence
 
 # ============================================================
 # Paths
@@ -104,3 +108,85 @@ def get_change_zones():
         ) from exc
 
     return geojson
+
+@app.get("/api/v1/analysis/zones/{region_id}/evidence")
+def get_zone_evidence_endpoint(
+    region_id: int,
+):
+    try:
+        evidence = get_zone_evidence(
+            region_id
+        )
+
+        return {
+            "region_id": evidence[
+                "region_id"
+            ],
+            "bounds": evidence[
+                "bounds"
+            ],
+            "properties": evidence[
+                "properties"
+            ],
+                "band_profile": evidence[
+                "band_profile"
+            ],
+
+            "ndvi_profile": evidence[
+                "ndvi_profile"
+            ],
+
+            "spectral_profile": evidence[
+                "spectral_profile"
+            ],
+
+            "images": {
+                "before": (
+                    "data:image/png;base64,"
+                    + base64.b64encode(
+                        evidence[
+                            "before_png"
+                        ]
+                    ).decode("utf-8")
+                ),
+                "after": (
+                    "data:image/png;base64,"
+                    + base64.b64encode(
+                        evidence[
+                            "after_png"
+                        ]
+                    ).decode("utf-8")
+                ),
+                "mask": (
+                    "data:image/png;base64,"
+                    + base64.b64encode(
+                        evidence[
+                            "mask_png"
+                        ]
+                    ).decode("utf-8")
+                ),
+                "overlay": (
+                    "data:image/png;base64,"
+                    + base64.b64encode(
+                        evidence[
+                            "overlay_png"
+                        ]
+                    ).decode("utf-8")
+                ),
+            },
+        }
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to generate zone evidence: "
+                f"{exc}"
+            ),
+        )

@@ -774,19 +774,15 @@ def run_pipeline() -> dict:
     polygon_regions = []
 
     for zone in zone_results:
-
         polygon_region = {
-            "region_id": zone["region_id"],
-            "pixels": zone["_pixels"],
-            "pixel_count": zone["pixel_count"],
-            "centroid_row": zone["centroid"]["row"],
-            "centroid_col": zone["centroid"]["col"],
-            "bbox": zone["bbox"],
+            key: value
+            for key, value in zone.items()
+            if key != "_pixels"
         }
 
-        polygon_regions.append(
-            polygon_region
-        )
+        polygon_region["pixels"] = zone["_pixels"]
+
+        polygon_regions.append(polygon_region)
 
     geojson = regions_to_feature_collection(
         regions=polygon_regions,
