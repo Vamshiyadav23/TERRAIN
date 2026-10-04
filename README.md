@@ -1,4 +1,4 @@
-@"
+
 # TERRAIN
 
 ## AI-Driven Satellite Image Change Intelligence System
@@ -34,7 +34,3 @@ Sentinel-2 Acquisition
 - Ollama
 - PostgreSQL / PostGIS
 
-### Project Status
-
-🚧 Under active development.
-"@ | Set-Content README.md
