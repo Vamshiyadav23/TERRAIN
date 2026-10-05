@@ -46,3 +46,10 @@ Thumbs.db
 # Logs
 *.log
 "@ | Set-Content .gitignore
+
+
+# Generated satellite data
+backend/satellite_data/
+
+# ML datasets
+datasets/
