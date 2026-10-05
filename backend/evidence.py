@@ -6,7 +6,9 @@ import numpy as np
 from PIL import Image
 from rasterio.features import rasterize
 from rasterio.transform import Affine
-
+from ml.spectral.preprocessing import (
+    harmonize_after_to_before,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -257,41 +259,134 @@ def crop_with_padding(
     max_col,
     padding=15,
 ):
+    """
+    Crop a region with padding while preserving the source raster resolution.
+    """
     height, width = image.shape[:2]
 
-    min_row = max(
-        0,
-        min_row - padding,
-    )
-
-    min_col = max(
-        0,
-        min_col - padding,
-    )
-
-    max_row = min(
-        height - 1,
-        max_row + padding,
-    )
-
-    max_col = min(
-        width - 1,
-        max_col + padding,
-    )
+    min_row = max(0, int(min_row) - int(padding))
+    min_col = max(0, int(min_col) - int(padding))
+    max_row = min(height - 1, int(max_row) + int(padding))
+    max_col = min(width - 1, int(max_col) + int(padding))
 
     return (
-        image[
-            min_row : max_row + 1,
-            min_col : max_col + 1,
-        ],
-        (
-            min_row,
-            min_col,
-            max_row,
-            max_col,
-        ),
+        image[min_row:max_row + 1, min_col:max_col + 1],
+        (min_row, min_col, max_row, max_col),
     )
 
+
+def crop_fixed_context(
+    image,
+    center_row,
+    center_col,
+    context_size=96,
+):
+    """
+    Create a fixed-size contextual crop around a zone.
+
+    The numerical detector remains at its native 256x256 resolution.
+    This function is visualization-only. It gives small zones enough
+    surrounding context to be interpretable in the dashboard.
+    """
+    height, width = image.shape[:2]
+
+    context_size = int(
+        min(context_size, height, width)
+    )
+
+    half = context_size // 2
+
+    center_row = int(center_row)
+    center_col = int(center_col)
+
+    min_row = center_row - half
+    min_col = center_col - half
+    max_row = min_row + context_size
+    max_col = min_col + context_size
+
+    if min_row < 0:
+        max_row -= min_row
+        min_row = 0
+
+    if min_col < 0:
+        max_col -= min_col
+        min_col = 0
+
+    if max_row > height:
+        shift = max_row - height
+        min_row = max(0, min_row - shift)
+        max_row = height
+
+    if max_col > width:
+        shift = max_col - width
+        min_col = max(0, min_col - shift)
+        max_col = width
+
+    # Final safety adjustment.
+    max_row = min(height, min_row + context_size)
+    max_col = min(width, min_col + context_size)
+
+    return (
+        image[min_row:max_row, min_col:max_col],
+        (min_row, min_col, max_row - 1, max_col - 1),
+    )
+
+
+def resize_display_image(
+    image,
+    size=384,
+):
+    """
+    Upscale a visualization for dashboard/PDF presentation.
+
+    This does not change any underlying Sentinel-2 measurements.
+    """
+    pil_image = Image.fromarray(
+        image,
+        mode="RGB",
+    )
+
+    # High-quality interpolation for the display image.
+    pil_image = pil_image.resize(
+        (size, size),
+        Image.Resampling.LANCZOS,
+    )
+
+    # Very light sharpening after upscaling.
+    # This improves edge readability without attempting
+    # to create artificial satellite detail.
+    from PIL import ImageFilter
+
+    pil_image = pil_image.filter(
+        ImageFilter.UnsharpMask(
+            radius=1.0,
+            percent=55,
+            threshold=3,
+        )
+    )
+
+    return np.asarray(pil_image)
+
+
+def resize_display_mask(
+    mask,
+    size=384,
+):
+    """
+    Resize a binary zone mask with nearest-neighbour interpolation so
+    boundaries remain categorical and are not blurred.
+    """
+    pil_mask = Image.fromarray(
+        mask.astype(np.uint8) * 255,
+        mode="L",
+    )
+
+    return np.asarray(
+        pil_mask.resize(
+            (size, size),
+            Image.Resampling.NEAREST,
+        )
+    ) > 127
 
 def build_zone_mask(
     feature,
@@ -345,22 +440,41 @@ def create_zone_mask_overlay(
     zone_mask,
 ):
     """
-    Creates a visual evidence image.
+    Create a contextual visualization of the detected change zone.
 
-    This is a visualization of the detected
-    zone only. It is not a probability map.
+    The zone itself is highlighted with a subtle cyan fill and
+    a strong cyan boundary. Detection metrics are unaffected.
     """
 
     output = before_rgb.copy()
 
+    # Dim the surrounding context slightly.
     outside = ~zone_mask
 
-    # Dim everything outside the detected zone.
     output[outside] = (
-        output[outside] * 0.30
+        output[outside].astype(np.float32) * 0.42
     ).astype(np.uint8)
 
-    # Add a bright white boundary.
+    # ---------------------------------------------------------
+    # Semi-transparent cyan fill inside detected zone
+    # ---------------------------------------------------------
+
+    zone_pixels = output[zone_mask].astype(np.float32)
+
+    cyan = np.array(
+        [0.0, 220.0, 255.0],
+        dtype=np.float32,
+    )
+
+    output[zone_mask] = (
+        zone_pixels * 0.82
+        + cyan * 0.18
+    ).astype(np.uint8)
+
+    # ---------------------------------------------------------
+    # Detect exact zone boundary
+    # ---------------------------------------------------------
+
     padded = np.pad(
         zone_mask,
         1,
@@ -380,14 +494,14 @@ def create_zone_mask_overlay(
         | ~right
     )
 
+    # Strong cyan boundary.
     output[boundary] = [
-        255,
-        255,
+        0,
+        235,
         255,
     ]
 
     return output
-
 
 def get_zone_evidence(region_id: int):
     feature = find_zone(region_id)
@@ -409,6 +523,13 @@ def get_zone_evidence(region_id: int):
     common_valid = (
         before_valid.astype(bool)
         & after_valid.astype(bool)
+    )
+    harmonized_after, stable_mask = (
+        harmonize_after_to_before(
+            before,
+            after,
+            common_valid,
+        )
     )
 
     spatial_reference = metadata[
@@ -449,6 +570,40 @@ def get_zone_evidence(region_id: int):
     min_col = int(cols.min())
     max_col = int(cols.max())
 
+    # ------------------------------------------------------------
+    # VISUAL CONTEXT
+    # ------------------------------------------------------------
+    # Small detected zones can be only a few dozen pixels wide.
+    # Cropping tightly around them produces tiny images such as
+    # 55x53, which become blurry when enlarged in the dashboard.
+    #
+    # Use a fixed 96x96 native-pixel context around the zone centroid.
+    # This changes visualization only; all numerical calculations
+    # below continue to use the exact evidence_mask.
+    # ------------------------------------------------------------
+
+    center_row = int(round(float(rows.mean())))
+    center_col = int(round(float(cols.mean())))
+
+        # Calculate the visual context from the 2D zone mask.
+    # This gives us true spatial row/column bounds.
+    _, visual_bounds = crop_fixed_context(
+        zone_mask,
+        center_row,
+        center_col,
+        context_size=160,
+    )
+
+    visual_min_row, visual_min_col, visual_max_row, visual_max_col = (
+        visual_bounds
+    )
+
+    zone_visual_mask = zone_mask[
+        visual_min_row:visual_max_row + 1,
+        visual_min_col:visual_max_col + 1,
+    ]
+
+    # ------------------------------------------------------------
     # Use combined physical percentiles so the
     # before/after visualizations remain comparable.
     combined_percentiles = []
@@ -458,7 +613,7 @@ def get_zone_evidence(region_id: int):
             band_index
         ][common_valid]
 
-        after_values = after[
+        after_values = harmonized_after[
             band_index
         ][common_valid]
 
@@ -494,48 +649,55 @@ def get_zone_evidence(region_id: int):
     )
 
     after_rgb = make_rgb(
-        after,
+        harmonized_after,
         common_valid,
         combined_percentiles,
     )
 
-    zone_crop_mask, crop_bounds = (
-        crop_with_padding(
-            zone_mask,
-            min_row,
-            min_col,
-            max_row,
-            max_col,
-            padding=15,
-        )
+    # ------------------------------------------------------------
+    # Extract the same fixed visual context from the RGB images.
+    # ------------------------------------------------------------
+
+    before_crop = before_rgb[
+        visual_min_row:visual_max_row + 1,
+        visual_min_col:visual_max_col + 1,
+    ]
+
+    after_crop = after_rgb[
+        visual_min_row:visual_max_row + 1,
+        visual_min_col:visual_max_col + 1,
+    ]
+
+    zone_crop_mask = zone_visual_mask
+
+    # ------------------------------------------------------------
+    # DISPLAY ENHANCEMENT
+    # ------------------------------------------------------------
+    # Keep native 96x96 context internally, then upscale only for
+    # visual presentation. No new satellite detail is introduced.
+    # ------------------------------------------------------------
+
+    before_crop = resize_display_image(
+        before_crop,
+        size=384,
     )
 
-    before_crop, _ = crop_with_padding(
-        before_rgb,
-        min_row,
-        min_col,
-        max_row,
-        max_col,
-        padding=15,
+    after_crop = resize_display_image(
+        after_crop,
+        size=384,
     )
 
-    after_crop, _ = crop_with_padding(
-        after_rgb,
-        min_row,
-        min_col,
-        max_row,
-        max_col,
-        padding=15,
+    zone_crop_mask = resize_display_mask(
+        zone_crop_mask,
+        size=384,
     )
 
-    # Zone-only mask.
+    # Clean categorical mask for API/PDF.
     mask_crop = (
-        zone_crop_mask.astype(
-            np.uint8
-        ) * 255
+        zone_crop_mask.astype(np.uint8) * 255
     )
 
-    # White zone boundary over the before image.
+    # Zone boundary over the before image.
     overlay = create_zone_mask_overlay(
         before_crop,
         zone_crop_mask,
@@ -558,7 +720,7 @@ def get_zone_evidence(region_id: int):
         :, evidence_mask
     ]
 
-    zone_values_after = after[
+    zone_values_after = harmonized_after[
         :, evidence_mask
     ]
 
@@ -604,11 +766,11 @@ def get_zone_evidence(region_id: int):
         3
     ][evidence_mask]
 
-    after_red = after[
+    after_red = harmonized_after[
         2
     ][evidence_mask]
 
-    after_nir = after[
+    after_nir = harmonized_after[
         3
     ][evidence_mask]
 
@@ -686,10 +848,10 @@ def get_zone_evidence(region_id: int):
         "region_id": region_id,
 
         "bounds": {
-            "min_row": crop_bounds[0],
-            "min_col": crop_bounds[1],
-            "max_row": crop_bounds[2],
-            "max_col": crop_bounds[3],
+            "min_row": visual_min_row,
+            "min_col": visual_min_col,
+            "max_row": visual_max_row,
+            "max_col": visual_max_col,
         },
 
         "properties": properties,
