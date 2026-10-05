@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-
+from ml.semantic.analyzer import analyze_zone
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import base64
-
-from fastapi.responses import JSONResponse
-
+from backend.satellite_imagery import acquire_before_after
+from fastapi.responses import JSONResponse, FileResponse
+import sys
 from backend.evidence import get_zone_evidence
 
+
+BASE_DIR = Path(__file__).resolve().parent.parent
 # ============================================================
 # Paths
 # ============================================================
@@ -70,7 +72,33 @@ def health():
         "status": "healthy",
     }
 
+# ============================================================
+# PDF REPORT
+# ============================================================
 
+@app.get("/api/v1/analysis/report/pdf")
+def download_analysis_report():
+    """
+    Return the latest TERRAIN satellite change analysis
+    as a professional PDF report.
+    """
+
+    report_pdf = OUTPUT_DIR / "terrain_change_report.pdf"
+
+    if not report_pdf.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "TERRAIN PDF report not found. "
+                "Generate the report first."
+            ),
+        )
+
+    return FileResponse(
+        path=str(report_pdf),
+        media_type="application/pdf",
+        filename="terrain_change_report.pdf",
+    )
 # ============================================================
 # Change zones
 # ============================================================
@@ -109,6 +137,67 @@ def get_change_zones():
 
     return geojson
 
+
+
+@app.get("/api/v1/analysis/summary")
+def get_analysis_summary():
+    report_path = OUTPUT_DIR / "spectral_zone_report.json"
+
+    if not report_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Spectral zone report not found"
+        )
+
+    try:
+        with open(report_path, "r", encoding="utf-8") as f:
+            report = json.load(f)
+            change_detection = report.get("change_detection", {})
+            report_summary = report.get("summary", {})
+            zones = report.get("zones", [])
+            regions = report.get("regions", [])
+
+        roi = report.get("roi", {})
+        detection = report.get("detection", {})
+        zones = report.get("zones", [])
+
+        return {
+            "changed_pixels": int(
+                detection.get("changed_pixels", 0)
+            ),
+            "roi_pixels": int(
+                roi.get("roi_pixels", 0)
+            ),
+            "changed_percentage": float(
+                detection.get("changed_percentage", 0)
+            ),
+            "zone_count": int(
+                detection.get(
+                    "grouped_regions",
+                    len(zones)
+                )
+            ),
+            "region_count": int(
+                detection.get("raw_regions", 0)
+            ),
+            "threshold": float(
+                detection.get("threshold", 0)
+            ),
+        }
+
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=500,
+            detail="Invalid spectral zone report JSON"
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to read analysis summary: {str(e)}"
+        )
+
+    
 @app.get("/api/v1/analysis/zones/{region_id}/evidence")
 def get_zone_evidence_endpoint(
     region_id: int,
@@ -190,3 +279,469 @@ def get_zone_evidence_endpoint(
                 f"{exc}"
             ),
         )
+
+@app.get("/api/v1/analysis/zones/{region_id}/semantic")
+def get_zone_semantic_analysis(region_id: int):
+    """
+    Run Qwen semantic interpretation for a detected
+    TERRAIN change zone.
+    """
+
+    try:
+        return analyze_zone(region_id)
+
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Semantic analysis failed: "
+                f"{exc}"
+            ),
+        )
+
+# ============================================================
+# LOCATION-BASED TERRAIN ANALYSIS
+# ============================================================
+
+@app.post("/analyze-area")
+def analyze_area(payload: dict):
+    """
+    Run a complete TERRAIN Sentinel-2 analysis for a
+    user-selected geographic location.
+
+    Flow:
+        User location
+            ↓
+        Sentinel-2 acquisition
+            ↓
+        B02/B03/B04/B08 spectral arrays
+            ↓
+        Temporal spectral change engine
+            ↓
+        Change zones + GeoJSON
+            ↓
+        API refresh
+    """
+
+    # --------------------------------------------------------
+    # READ REQUEST
+    # --------------------------------------------------------
+
+    try:
+        latitude = float(payload.get("latitude"))
+        longitude = float(payload.get("longitude"))
+
+        radius_m = float(
+            payload.get(
+                "radius_m",
+                payload.get("radius", 500),
+            )
+        )
+
+        before_date = str(
+            payload.get("before_date")
+        )
+
+        after_date = str(
+            payload.get("after_date")
+        )
+
+    except (TypeError, ValueError) as exc:
+
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid analysis parameters: {exc}",
+        )
+
+    # --------------------------------------------------------
+    # VALIDATION
+    # --------------------------------------------------------
+
+    if not -90 <= latitude <= 90:
+        raise HTTPException(
+            status_code=400,
+            detail="Latitude must be between -90 and 90.",
+        )
+
+    if not -180 <= longitude <= 180:
+        raise HTTPException(
+            status_code=400,
+            detail="Longitude must be between -180 and 180.",
+        )
+
+    if radius_m <= 0 or radius_m > 5000:
+        raise HTTPException(
+            status_code=400,
+            detail="Radius must be between 0 and 5000 meters.",
+        )
+
+    if not before_date or not after_date:
+        raise HTTPException(
+            status_code=400,
+            detail="Both before_date and after_date are required.",
+        )
+
+    if before_date >= after_date:
+        raise HTTPException(
+            status_code=400,
+            detail="before_date must be earlier than after_date.",
+        )
+
+    print()
+    print("=" * 70)
+    print("TERRAIN LOCATION-BASED SATELLITE ANALYSIS")
+    print("=" * 70)
+
+    print(f"Latitude    : {latitude}")
+    print(f"Longitude   : {longitude}")
+    print(f"Radius      : {radius_m} m")
+    print(f"Before      : {before_date}")
+    print(f"After       : {after_date}")
+    print("=" * 70)
+
+    # --------------------------------------------------------
+    # STEP 1
+    # SENTINEL-2 SPECTRAL ACQUISITION
+    # --------------------------------------------------------
+
+    print()
+    print("STEP 1: ACQUIRING SENTINEL-2 SPECTRAL DATA")
+    print("=" * 70)
+
+    try:
+
+        acquisition = acquire_before_after(
+            latitude=latitude,
+            longitude=longitude,
+            radius_m=radius_m,
+            before_date_range=before_date,
+            after_date_range=after_date,
+            max_cloud_cover=20.0,
+            output_size=(256, 256),
+        )
+
+    except Exception as exc:
+
+        print()
+        print("SENTINEL-2 ACQUISITION FAILED")
+        print(str(exc))
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Sentinel-2 acquisition failed: "
+                f"{exc}"
+            ),
+        )
+
+    print()
+    print("Sentinel-2 spectral acquisition completed.")
+
+    # --------------------------------------------------------
+    # VERIFY ACQUISITION OUTPUT
+    # --------------------------------------------------------
+
+    # spectral_dir = (
+    #     PROJECT_ROOT
+    #     / "backend"
+    #     / "satellite_data"
+    #     / "spectral"
+    # )
+
+    before_spectral_path = (
+        BASE_DIR / "backend" / "satellite_data" / "before" / "before_spectral.npy"
+    )
+
+    after_spectral_path = (
+        BASE_DIR / "backend" / "satellite_data" / "after" / "after_spectral.npy"
+    )
+
+    if not before_spectral_path.exists():
+        raise HTTPException(
+            status_code=500,
+            detail=f"BEFORE spectral array was not generated: {before_spectral_path}",
+        )
+
+    if not after_spectral_path.exists():
+        raise HTTPException(
+            status_code=500,
+            detail=f"AFTER spectral array was not generated: {after_spectral_path}",
+        )
+
+    # --------------------------------------------------------
+    # STEP 2
+    # RUN TERRAIN SPECTRAL CHANGE ENGINE
+    # --------------------------------------------------------
+
+    print()
+    print("STEP 2: RUNNING TERRAIN SPECTRAL CHANGE ENGINE")
+    print("=" * 70)
+
+    spectral_pipeline = (
+        PROJECT_ROOT
+        / "ml"
+        / "spectral"
+        / "pipeline.py"
+    )
+
+    if not spectral_pipeline.exists():
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Spectral pipeline not found: "
+                f"{spectral_pipeline}"
+            ),
+        )
+
+    import subprocess
+
+    try:
+
+        detector_result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "ml.spectral.pipeline",
+            ],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+
+    except subprocess.TimeoutExpired:
+
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                "TERRAIN spectral analysis timed out."
+            ),
+        )
+
+    print(detector_result.stdout)
+
+    if detector_result.returncode != 0:
+
+        print(detector_result.stderr)
+
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": (
+                    "TERRAIN spectral change engine failed."
+                ),
+                "details": detector_result.stderr,
+            },
+        )
+
+    # --------------------------------------------------------
+    # STEP 3
+    # VERIFY REPORT
+    # --------------------------------------------------------
+
+    report_file = (
+        PROJECT_ROOT
+        / "outputs"
+        / "spectral_zone_report.json"
+    )
+
+    geojson_file = (
+        PROJECT_ROOT
+        / "outputs"
+        / "spectral_change_zones.geojson"
+    )
+
+    if not report_file.exists():
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Spectral engine completed but "
+                "spectral_zone_report.json was not generated."
+            ),
+        )
+
+    # --------------------------------------------------------
+    # READ REPORT
+    # --------------------------------------------------------
+
+    try:
+
+        with report_file.open(
+            "r",
+            encoding="utf-8",
+        ) as file:
+
+            report = json.load(file)
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Could not read TERRAIN spectral report: "
+                f"{exc}"
+            ),
+        )
+
+    # --------------------------------------------------------
+    # ATTACH CURRENT ANALYSIS METADATA
+    # --------------------------------------------------------
+
+    report.setdefault(
+        "metadata",
+        {},
+    )
+
+    report["metadata"]["analysis_request"] = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "radius_m": radius_m,
+        "before_date": before_date,
+        "after_date": after_date,
+    }
+
+    report["metadata"]["satellite_acquisition"] = (
+        acquisition
+    )
+
+    # Save updated report.
+
+    try:
+
+        with report_file.open(
+            "w",
+            encoding="utf-8",
+        ) as file:
+
+            json.dump(
+                report,
+                file,
+                indent=2,
+            )
+
+    except Exception as exc:
+
+        print(
+            "WARNING: Could not update report metadata:",
+            exc,
+        )
+
+    # --------------------------------------------------------
+    # EXTRACT SUMMARY
+    # --------------------------------------------------------
+
+    roi = report.get("roi", {})
+    detection = report.get("detection", {})
+    zones = report.get("zones", [])
+
+    changed_pixels = int(
+        detection.get("changed_pixels", 0)
+    )
+
+    roi_pixels = int(
+        roi.get("roi_pixels", 0)
+    )
+
+    changed_percentage = float(
+        detection.get("changed_percentage", 0.0)
+    )
+
+    threshold = detection.get("threshold")
+
+    zone_count = int(
+        detection.get(
+            "grouped_regions",
+            len(zones)
+        )
+    )
+
+    region_count = int(
+        detection.get("raw_regions", 0)
+    )
+
+    # --------------------------------------------------------
+    # COMPLETE
+    # --------------------------------------------------------
+
+    print()
+    print("=" * 70)
+    print("TERRAIN LOCATION ANALYSIS COMPLETE")
+    print("=" * 70)
+
+    print(
+        f"Changed pixels : {changed_pixels}"
+    )
+
+    print(
+        f"ROI pixels     : {roi_pixels}"
+    )
+
+    print(
+        f"Changed area   : {changed_percentage}%"
+    )
+
+    print(
+        f"Zones          : {zone_count}"
+    )
+
+    print(
+        f"Regions        : {region_count}"
+    )
+
+    print("=" * 70)
+
+    return {
+        "success": True,
+
+        "message": (
+            "TERRAIN satellite analysis completed successfully."
+        ),
+
+        "analysis": {
+            "latitude": latitude,
+            "longitude": longitude,
+            "radius_m": radius_m,
+            "before_date": before_date,
+            "after_date": after_date,
+        },
+
+        "satellite": acquisition,
+
+        
+
+        "summary": {
+            "changed_pixels": changed_pixels,
+            "roi_pixels": roi_pixels,
+            "changed_percentage": changed_percentage,
+            "zone_count": zone_count,
+            "region_count": region_count,
+            "threshold": threshold,
+        },
+
+        "report": report,
+
+        "outputs": {
+            "spectral_report": str(
+                report_file
+            ),
+            "geojson": (
+                str(geojson_file)
+                if geojson_file.exists()
+                else None
+            ),
+        },
+    }
