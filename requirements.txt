@@ -13,4 +13,4 @@ python-dotenv
 shapely
 pyproj
 Pillow
-
+reportlab>=4.2,<5
